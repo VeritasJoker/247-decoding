@@ -33,6 +33,7 @@ HYPER_PARAMS := --batch-size 608 --lr 0.0019 --dropout 0.11 --reg 0.01269 --reg-
 
 PARAMS := vsr
 HYPER_PARAMS := --batch-size 256 --lr 0.00025 --dropout 0.21 --reg 0.003 --reg-head 0.0005 --conv-filters 160 --epochs 1500 --patience 150 --half-window 312.5 --n-weight-avg 20
+HYPER_PARAMS := --batch-size 364 --lr 4.6216745214628314e-05 --dropout 0.6127339711827714 --reg 0.0005345717435761599 --reg-head 0.0005 --conv-filters 160 --epochs 1500 --patience 150 --half-window 312.5 --n-weight-avg 20
 
 # Dataset options
 # ---------------
@@ -46,6 +47,7 @@ SID := 777
 SIG_FN := --sig-elec-file data/129-phase-5000-sig-elec-glove50d-perElec-FDR-01-LH.csv
 SIG_FN := --sig-elec-file data/164-phase-5000-sig-elec-gpt2xl50d-perElec-FDR-01-LH.csv
 SIG_FN := --sig-elec-file data/160-phase-5000-sig-elec-glove50d-perElec-FDR-01-LH_newVer.csv
+SIG_FN := --sig-elec-file data/oneshot-all-ifg.csv
 
 NE = 160
 
@@ -57,23 +59,24 @@ PCA :=
 
 # gpt2
 EMB := $(SID)_full_gpt2-xl_cnxt_1024_layer_48_embeddings.pkl
+EMB := $(SID)_labels_new_no_freq_unique_random_lower_with_token_id.pkl
+EMB2 := $(SID)_embeddings_gpt2_1600_new_no_freq.pkl
 EMBN = gpt2xl
 PCA := --pca 50
 
 # blenderbot
 # EMB := blenderbot-small
 
-
 # Align with others
 ALIGN_WITH = --align-with gpt2 blenderbot_small_90M
 ALIGN_WITH = --align-with gpt2
 
 # Minimum word frequency
-MWF := 5
+MWF := 0
 
 # Choose which modes to run for: production, comprehension, or both.
-MODES := prod comp
 MODES := prod
+MODES := prod comp
 MODES := comp
 
 # Running options
@@ -96,8 +99,8 @@ LAGX := 1
 
 # Choose the lags to run for in ms
 # LAGS := $(shell yes "{-1024..1024..256}" | head -n $(LAGX) | tr '\n' ' ')
-LAGS = $(shell seq -1000 250 1000)
 LAGS = 250
+LAGS = $(shell seq 200 20 400)
 
 # -----------------------------------------------------------------------------
 # Decoding
@@ -110,6 +113,7 @@ run-decoding:
 	    $(CMD) code/tfsdec_main.py \
 	        --signal-pickle data/$(PJCT)/$(SID)/pickles/$(SID)_binned_signal.pkl \
 	        --label-pickle data/$(PJCT)/$(SID)/pickles/$(EMB) \
+			--embedding-pickle data/$(PJCT)/$(SID)/pickles/$(EMB2) \
 	        --lags $(LAGS) \
 	        $(HYPER_PARAMS) \
 	        --mode $${mode} \
@@ -121,8 +125,29 @@ run-decoding:
 	        $(MODE) \
 	        $(EMBP) \
 	        $(MISC) \
-	        --model latest3foldafter-s-$(SID)_e-$(NE)_t-$(MODN)_m-$${mode}_e-$(EMBN)_p-$(PARAMS)_mwf-$(MWF); \
+	        --model latest3foldafter-s-$(SID)_e-$(NE)_t-$(MODN)_m-$${mode}_e-$(EMBN)_p-$(PARAMS)_mwf-$(MWF)-p1; \
 	done
+
+param-search:
+	for mode in $(MODES); do \
+	    $(CMD) code/param_search_optuna.py \
+	        --signal-pickle data/$(PJCT)/$(SID)/pickles/$(SID)_binned_signal.pkl \
+	        --label-pickle data/$(PJCT)/$(SID)/pickles/$(EMB) \
+			--embedding-pickle data/$(PJCT)/$(SID)/pickles/$(EMB2) \
+	        --lags $(LAGS) \
+	        $(HYPER_PARAMS) \
+	        --mode $${mode} \
+		--min-dev-freq $(MWF) --min-test-freq $(MWF) \
+		--verbose 0 \
+		$(SIG_FN) \
+		$(ALIGN_WITH) \
+	        $(PCA) \
+	        $(MODE) \
+	        $(EMBP) \
+	        $(MISC) \
+	        --model latest3foldafter-s-$(SID)_e-$(NE)_t-$(MODN)_m-$${mode}_e-$(EMBN)_p-$(PARAMS)_mwf-$(MWF)-pss; \
+	done
+
 
 # In case you need to run the ensemble on its own
 run-ensemble:
@@ -155,34 +180,35 @@ plots: aggregate-results plot sync-plots
 plot:
 	mkdir -p results/plots/
 	python code/plot.py \
-	    --q "model == 's-777_e-160_t-regress_m-comp_e-glove50_p-vsr_mwf-5' and ensemble == True and lag >= -512 and lag <= 512" \
-	        "model == 's-777_e-160_t-regress_m-comp_e-gpt2-xl_p-vsr_mwf-5' and ensemble == True and lag >= -512 and lag <= 512" \
-	    --labels glove gpt2 \
+	    --q "model == 'latest3foldafter-s-777_e-160_t-regress_m-comp_e-gpt2xl_p-vsr_mwf-0-p1' and ensemble == True and lag >= -1000 and lag <= 1000" \
+	    --labels gpt2 \
 	    --x lag \
 	    --y avg_test_nn_rocauc_test_w_avg \
-	    --output results/plots/s-777_e-160_t-regress_m-comp_e-gg_p-borgcls
+	    --output results/plots/s-777_e-160_t-regress_m-comp_e-gg_p-vrs
+	cp -f results/plots/* ~/tigress/podcast-decoding-results/
 
 aggregate-results:
 	python code/aggregate_results.py
-	cp -f results/aggregate.csv /tigress/zzada/247-decoding-results/
+	cp -f results/aggregate.csv ~/tigress/podcast-decoding-results/
 
 
 # -----------------------------------------------------------------------------
 #  Misc. targets
 # -----------------------------------------------------------------------------
-
+USER := kw1166
 setup:
-	mkdir -p /scratch/gpfs/$USER/247-decoding/{data,results,logs}
-	ln -s /scratch/gpfs/$USER/247-decoding/data
-	ln -s /scratch/gpfs/$USER/247-decoding/logs
-	ln -s /scratch/gpfs/$USER/247-decoding/results
-	@echo ln -s /scratch/gpfs/$USER/247-pickling/results/* /scratch/gpfs/$USER/247-decoding/data/
+	mkdir -p /scratch/gpfs/$(USER)/247-decoding/{data,results,logs}
+	ln -s /scratch/gpfs/$(USER)/247-decoding/data
+	ln -s /scratch/gpfs/$(USER)/247-decoding/logs
+	ln -s /scratch/gpfs/$(USER)/247-decoding/results
+	@echo ln -s /scratch/gpfs/$(USER)/247-pickling/results/* /scratch/gpfs/$(USER)/247-decoding/data/
 
 
 # If you have pickled the data yourself, then you can just link to it
 link-data:
 	echo "revisit this:"
-	# ln -sf $(shell dirname `pwd`)/247-pickling/results/* data/
+	ln -sf $(shell dirname `pwd`)/247-pickling/results/* data/
+	ln -s /projects/HASSON/247/data/podcast-data/*.csv data/
 
 # Otherwise, you can download it from google cloud bucket
 download-data:

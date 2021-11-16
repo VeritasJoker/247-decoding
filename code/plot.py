@@ -16,7 +16,7 @@ def plot(args):
     # Plot each query as a separate line
     for query, label in zip(args.q, args.labels):
         sub_df = df.query(query).sort_values(by=args.x)
-        x = sub_df[args.x] / 16  # NOTE - hardcoded.
+        x = sub_df[args.x]  # NOTE - hardcoded.
         y = sub_df[args.y]
 
         assert not y.isna().all(), 'all nans'

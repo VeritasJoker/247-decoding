@@ -19,7 +19,6 @@ from sklearn.decomposition import PCA
 from evaluate import (evaluate_embeddings, evaluate_roc, evaluate_topk,
                       get_class_predictions, get_class_predictions_kd)
 
-
 def set_seed(seed=42):
     """Currently unused."""
     np.random.seed(seed)
@@ -40,6 +39,7 @@ def arg_parser():
                         help='[prod]uction or [comp]rehension')
     parser.add_argument('--signal-pickle', type=str, required=True, help='')
     parser.add_argument('--label-pickle', type=str, required=True, help='')
+    parser.add_argument('--embedding-pickle', type=str, required=True, help='')
     parser.add_argument('--half-window', type=float, default=312.5, help='')
     parser.add_argument('--pca', type=int, default=None, help='')
     parser.add_argument('--min-word-freq', type=int, default=0)
@@ -155,12 +155,32 @@ def arg_parser():
     return args
 
 
+def combine_label_embeddings(label_folds, embeddings, **kwargs):
+
+    label_folds = pd.DataFrame([*label_folds.values()][0])
+
+    combined = label_folds.merge(embeddings, how = 'left', on = ['word','adjusted_onset'])
+
+    combined['lemmatized_word'] = combined['word']
+    combined['in_glove'] = combined['in_gpt2'] = 1
+    combined['word_freq_overall'] = kwargs['min_word_freq'] + 1
+    combined['onset'] = combined['adjusted_onset']
+
+    return combined
+
+
 def load_pickles(args):
+
     with open(args.label_pickle, 'rb') as fh:
         label_folds = pickle.load(fh)
     
     with open(args.signal_pickle, 'rb') as fh:
         signal_d = pickle.load(fh)
+    
+    if args.embedding_pickle: # embedding pickle separate from label
+        with open(args.embedding_pickle, 'rb') as fh:
+            embeddings = pickle.load(fh)
+        label_folds = combine_label_embeddings(label_folds, embeddings, min_word_freq = args.min_word_freq)
 
     print('Signals pickle info')
     for key in signal_d.keys():
@@ -193,13 +213,14 @@ def load_pickles(args):
         sigelecs.set_index(['subject', 'electrode'], inplace=True)
 
         electrodes = sigelecs.join(elecs).id.values
+        electrodes = electrodes[~np.isnan(electrodes)].astype(int)
         signals = signals[..., electrodes]
         print(f'Using subset of electrodes: {electrodes.size}')
 
     return signals, stitch_index, label_folds
 
 
-def pitom(input_shapes, n_classes):
+def pitom(args, input_shapes, n_classes):
     '''Define the decoding model.
     input_shapes = (input_shape_cnn, input_shape_emb)
     '''
@@ -284,7 +305,6 @@ class WeightAverager(tf.keras.callbacks.Callback):
             self.model.set_weights(w)
             print('Averaged {} weights.'.format(p + 1))
 
-
 def language_decoder(args):
     """Define language model decoder. Currently unusued."""
     lang_model = transformers.TFBertForMaskedLM.from_pretrained(
@@ -325,6 +345,7 @@ def extract_signal_from_fold(examples, stitch_index, signals, args):
     stitches = np.array(stitch_index)
     x, w, z = [], [], []
     for label in examples:
+
         bin_index = int(label['onset'] // 32)  # divide by 32 for binned signal
         bin_rank = (stitches <= bin_index).nonzero()[0][-1]
         bin_start, bin_stop = stitch_index[bin_rank], stitch_index[bin_rank + 1]
@@ -396,6 +417,7 @@ def get_fold_data(k, df, stitch, X, args):
 
     # Determine indexing
     # word2index = {w: j for j, w in enumerate(sorted(set(w_train.tolist())))}
+
     allwords = w_train.tolist() + w_dev.tolist() + w_test.tolist()
     word2index = {w: j for j, w in enumerate(sorted(set(allwords)))}
     y_train = np.array([word2index[w] for w in w_train])
@@ -437,18 +459,17 @@ def load_trained_models(k, args):
 
 def train_regression(x_train, y_train, x_dev, y_dev, args):
     '''Train a regression model'''
-    model = pitom([x_train.shape[1:]], n_classes=y_train.shape[1])
+    model = pitom(args, [x_train.shape[1:]], n_classes=y_train.shape[1])
     model.compile(loss='mse',
                   optimizer=tf.keras.optimizers.Adam(lr=args.lr),
                   metrics=[tf.keras.metrics.CosineSimilarity()])
 
-    args.stop_monitor = 'val_cosine_similarity'
+    args.stop_monitor = 'cosine_similarity'
     return train_model(model, x_train, y_train, x_dev, y_dev, args)
-
 
 def train_classifier(x_train, y_train, x_dev, y_dev, args):
     '''Train a classifier model'''
-    model = pitom([x_train.shape[1:]], n_classes=None)
+    model = pitom(args, [x_train.shape[1:]], n_classes=None)
     model = tf.keras.Model(inputs=model.input,
                            outputs=get_decoder(args)(model.output))
     model.compile(
@@ -496,14 +517,14 @@ def train_model(model, x_train, y_train, x_dev, y_dev, args):
                         validation_data=[x_dev, y_dev],
                         callbacks=callbacks,
                         verbose=args.verbose)
-    model.save(os.path.join(args.save_dir, f'model-fold{i}.h5'))
+    model.save(os.path.join(args.save_dir, f'model-fold{args.fold_index}.h5'))
 
     # Store final value of each metric
     results = {k: float(v[-1]) for k, v in history.history.items()}
     return model, results
 
 
-def evaluate_regression(models, w_train, x_test, y_test, z_test, all_data, w2i,
+def evaluate_regression(models, w_train, y_train, x_test, y_test, z_test, all_data, w2i,
                         args):
     '''
     z_test are embeddings.
@@ -545,7 +566,7 @@ def evaluate_regression(models, w_train, x_test, y_test, z_test, all_data, w2i,
                             embs,
                             prefix='test_',
                             save_dir=args.save_dir,
-                            suffix=f'-fold_{i}'))
+                            suffix=f'-fold_{args.fold_index}'))
 
     # Evaluate ROC-AUC
     index2word = {j: word for word, j in w2i.items()}
@@ -555,7 +576,7 @@ def evaluate_regression(models, w_train, x_test, y_test, z_test, all_data, w2i,
                        Counter(w_train),
                        args.save_dir,
                        prefix='test_nn_',
-                       suffix=f'ds_test-fold_{i}')
+                       suffix=f'ds_test-fold_{args.fold_index}')
     results.update(res)
 
     # Evaluate top1
@@ -572,7 +593,7 @@ def evaluate_regression(models, w_train, x_test, y_test, z_test, all_data, w2i,
                         Counter(y_train),
                         args.save_dir,
                         prefix='test_nn_',
-                        suffix=f'ds_test-fold_{i}')
+                        suffix=f'ds_test-fold_{args.fold_index}')
     results.update(res)
 
     return results
@@ -612,7 +633,7 @@ def evaluate_classifier(models, w_train, x_test, y_test, w2i, args):
                         w_train_freq,
                         args.save_dir,
                         prefix='test_',
-                        suffix=f'ds_test-fold_{i}')
+                        suffix=f'ds_test-fold_{args.fold_index}')
     results.update(res)
 
     res2 = evaluate_roc(predictions,
@@ -621,7 +642,7 @@ def evaluate_classifier(models, w_train, x_test, y_test, w2i, args):
                         w_train_freq,
                         args.save_dir,
                         prefix='test_',
-                        suffix=f'ds_test-fold_{i}',
+                        suffix=f'ds_test-fold_{args.fold_index}',
                         title=args.model)
     results.update(res2)
 
@@ -686,7 +707,7 @@ def prepare_data(df, args):
     df['label'] = df.lemmatized_word.str.lower()
 
     # Clean up data
-    df = df[df.onset > 0]
+    # df = df[df.onset > 0]
     df = df[~df.label.isin(list(string.punctuation))]
 
     # Remove nans
@@ -713,7 +734,7 @@ def prepare_data(df, args):
     assert df.size > 0, 'No data left after processing criteria'
 
     # Create folds based on filtered dataset
-    df = create_folds(df.reset_index(drop=True), 5)
+    # df = create_folds(df.reset_index(drop=True), 5)
 
     return df
 
@@ -756,22 +777,28 @@ def save_results(fold_results, args):
         json.dump(results, fp, indent=4)
 
 
+def get_fold_num(df):
+    folds_columns = [column for column in df.columns if 'fold' in column]
+    return len(folds_columns)
+
+
 if __name__ == '__main__':
     args = arg_parser()
-
+    
     # Load data
     signals, stitch_index, label_folds = load_pickles(args)
-    df = pd.DataFrame(label_folds)
-    df = prepare_data(df, args)  # prune
+    # df = pd.DataFrame(label_folds)
+    df = prepare_data(label_folds, args)  # prune
 
     # Run
     histories = []
     fold_results = []
 
-    k = 5
+    k = get_fold_num(df)
     for i in range(k):
         print(f'Running fold {i}')
         # tf.keras.backend.clear_session()
+        args.fold_index = i
 
         # Extract data from just this fold
         data, w2i, meta = get_fold_data(i, df, stitch_index, signals, args)
@@ -801,7 +828,7 @@ if __name__ == '__main__':
 
         # Evaluate
         if args.classify:
-            res = evaluate_classifier(models, w_train, x_test, y_test, w2i,
+            res = evaluate_classifier(models, w_train, y_train, x_test, y_test, w2i,
                                       args)
             results.update(res)
         else:
@@ -810,7 +837,7 @@ if __name__ == '__main__':
             z_all = np.concatenate((z_train, z_dev, z_test), axis=0)
             all_data = (w_all, y_all, z_all)
 
-            res = evaluate_regression(models, w_train, x_test, y_test, z_test,
+            res = evaluate_regression(models, w_train, y_train, x_test, y_test, z_test,
                                       all_data, w2i, args)
             results.update(res)
 
