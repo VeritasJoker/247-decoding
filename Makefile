@@ -99,8 +99,8 @@ LAGX := 1
 
 # Choose the lags to run for in ms
 # LAGS := $(shell yes "{-1024..1024..256}" | head -n $(LAGX) | tr '\n' ' ')
-LAGS = 250
 LAGS = $(shell seq 200 20 400)
+LAGS = 250
 
 # -----------------------------------------------------------------------------
 # Decoding
